@@ -1,10 +1,10 @@
 # Scrapy Cloud config (https://app.zyte.com)
-# After creating the project, uncomment and set your project ID
-# (shown in the dashboard URL: app.zyte.com/p/<ID>/...),
-# or deploy with: shub deploy <ID>
-#
-# projects:
-#   default: 000000
+projects:
+  default: 880628
 
 stacks:
   default: scrapy:2.14-20260217
+
+# shub only uploads requirements.txt when explicitly configured -
+# without this, libsql would be missing on the cloud.
+requirements_file: requirements.txt
