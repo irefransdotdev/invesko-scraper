@@ -1,0 +1,13 @@
+config
+database
+items
+middlewares
+migrate_funds
+migrate_v2
+navpu_parsing
+pifa_parsing
+pipelines
+reprocess_failed
+settings
+spiders
+verify_db
