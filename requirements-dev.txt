@@ -1,0 +1,4 @@
+-r requirements.txt
+scrapy>=2.19
+pytest>=8.0
+shub

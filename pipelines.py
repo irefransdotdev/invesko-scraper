@@ -7,6 +7,7 @@ dead-letter JSON file in output/failed/ for later reprocessing
 """
 
 import json
+import os
 from datetime import datetime
 from pathlib import Path
 
@@ -19,6 +20,21 @@ from items import BatchDoneItem, NavpuItem
 
 FAILED_DIR = Path(__file__).resolve().parent / "output" / "failed"
 
+# Scrapy Cloud delivers secrets as Scrapy settings (project Settings page),
+# not as environment variables - copy them so config.db_config() sees them.
+_SECRET_SETTINGS = ("TURSO_DATABASE_URL", "TURSO_AUTH_TOKEN")
+
+
+def load_settings_secrets(settings) -> None:
+    """Copy secret Scrapy settings into os.environ (never overriding env).
+
+    Only key NAMES are safe to log; values must never be printed.
+    """
+    for key in _SECRET_SETTINGS:
+        value = settings.get(key)
+        if value and not os.environ.get(key, "").strip():
+            os.environ[key] = str(value)
+
 
 class NavpuDatabasePipeline:
     @classmethod
@@ -26,6 +42,7 @@ class NavpuDatabasePipeline:
         pipeline = cls()
         pipeline.crawler = crawler
         pipeline.stats = crawler.stats
+        load_settings_secrets(crawler.settings)
         return pipeline
 
     @property

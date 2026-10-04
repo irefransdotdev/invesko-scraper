@@ -1,3 +1,3 @@
-scrapy>=2.19
+# Runtime deps installed by Scrapy Cloud on top of the stack.
+# The stack already provides Scrapy itself - do not pin scrapy here.
 libsql>=0.1.11
-pytest>=8.0  # dev/tests

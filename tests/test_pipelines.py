@@ -2,11 +2,13 @@
 
 import json
 import logging
+import os
 from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
 from scrapy.exceptions import DropItem
+from scrapy.settings import Settings
 
 import database
 import pipelines
@@ -42,6 +44,7 @@ def pipeline(db, monkeypatch):
     crawler = SimpleNamespace(
         spider=SimpleNamespace(logger=logging.getLogger("test-spider")),
         stats=Mock(),
+        settings=Settings(),
     )
     pipe = pipelines.NavpuDatabasePipeline.from_crawler(crawler)
     pipe.open_spider()
@@ -135,6 +138,7 @@ def test_mutual_marker_saves_with_source(conn, db, monkeypatch):
     crawler = SimpleNamespace(
         spider=SimpleNamespace(logger=logging.getLogger("test-spider")),
         stats=Mock(),
+        settings=Settings(),
     )
     pipe = pipelines.NavpuDatabasePipeline.from_crawler(crawler)
     pipe.open_spider()
@@ -190,3 +194,35 @@ def test_reprocess_legacy_payload_format(tmp_path, conn):
     assert item.batch_key == "5"
     assert item.batch_name == "Legacy Bank"
     assert item.roi_1y == 3.3
+
+
+def test_secret_settings_copied_to_env(monkeypatch):
+    monkeypatch.setenv("TURSO_DATABASE_URL", "")
+    monkeypatch.setenv("TURSO_AUTH_TOKEN", "")
+    settings = Settings(
+        {
+            "TURSO_DATABASE_URL": "libsql://cloud.example",
+            "TURSO_AUTH_TOKEN": "secret-token",
+        }
+    )
+    crawler = SimpleNamespace(settings=settings, stats=Mock())
+    pipelines.NavpuDatabasePipeline.from_crawler(crawler)
+    assert os.environ["TURSO_DATABASE_URL"] == "libsql://cloud.example"
+    assert os.environ["TURSO_AUTH_TOKEN"] == "secret-token"
+
+
+def test_real_env_never_overridden_by_settings(monkeypatch):
+    monkeypatch.setenv("TURSO_DATABASE_URL", "libsql://from-local-env")
+    settings = Settings({"TURSO_DATABASE_URL": "libsql://from-dashboard"})
+    crawler = SimpleNamespace(settings=settings, stats=Mock())
+    pipelines.NavpuDatabasePipeline.from_crawler(crawler)
+    assert os.environ["TURSO_DATABASE_URL"] == "libsql://from-local-env"
+
+
+def test_missing_secret_settings_leave_env_untouched(monkeypatch):
+    monkeypatch.setenv("TURSO_DATABASE_URL", "")
+    monkeypatch.setenv("TURSO_AUTH_TOKEN", "")
+    crawler = SimpleNamespace(settings=Settings(), stats=Mock())
+    pipelines.NavpuDatabasePipeline.from_crawler(crawler)
+    assert os.environ["TURSO_DATABASE_URL"] == ""
+    assert os.environ["TURSO_AUTH_TOKEN"] == ""
