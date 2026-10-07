@@ -66,6 +66,7 @@ DOWNLOAD_DELAY_JITTER = 0
 # See https://docs.scrapy.org/en/latest/topics/item-pipeline.html
 ITEM_PIPELINES = {
     "pipelines.NavpuDatabasePipeline": 300,
+    "pipelines.PseDividendsPipeline": 310,
 }
 
 # HTTP-level retries (network errors, 429/5xx) - separate from DB save retries

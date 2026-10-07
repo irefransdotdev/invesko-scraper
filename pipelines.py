@@ -1,6 +1,10 @@
-"""Item pipeline: buffer per-batch NAVPU rows, save each batch in one transaction.
+"""Item pipelines: buffer per-batch rows, save each batch in one transaction.
 
-Retry policy: database.save_batch already retries with exponential
+NavpuDatabasePipeline handles uitf/mutual NAVPU batches; PseDividendsPipeline
+handles PSE Edge company + dividend rows. Each passes items of the other
+type through untouched.
+
+Retry policy: database.save_* already retries with exponential
 backoff. If every attempt fails the batch is rolled back and written to a
 dead-letter JSON file in output/failed/ for later reprocessing
 (see reprocess_failed.py).
@@ -16,7 +20,7 @@ from scrapy.exceptions import DropItem
 
 import database
 from config import db_config
-from items import BatchDoneItem, NavpuItem
+from items import BatchDoneItem, DividendItem, NavpuItem, PseCompanyItem
 
 FAILED_DIR = Path(__file__).resolve().parent / "output" / "failed"
 
@@ -151,6 +155,91 @@ class NavpuDatabasePipeline:
             "failed_at": datetime.now().isoformat(timespec="seconds"),
             "error": str(error),
             "items": [ItemAdapter(item).asdict() for item in items],
+        }
+        path.write_text(
+            json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8"
+        )
+        return path
+
+
+class PseDividendsPipeline:
+    """Buffer PSE company/dividend rows, save both tables in one transaction.
+
+    Shares the retry + dead-letter policy of NavpuDatabasePipeline. Items
+    of other types (NAVPU) pass through untouched, and vice versa.
+    """
+
+    @classmethod
+    def from_crawler(cls, crawler):
+        pipeline = cls()
+        pipeline.crawler = crawler
+        pipeline.stats = crawler.stats
+        load_settings_secrets(crawler.settings)
+        return pipeline
+
+    @property
+    def spider(self):
+        return self.crawler.spider
+
+    def open_spider(self):
+        self.companies: list[PseCompanyItem] = []
+        self.dividends: list[DividendItem] = []
+        database.init_schema()
+        cfg = db_config()
+        destination = cfg["url"] if cfg["is_remote"] else cfg["local_path"]
+        self.spider.logger.info("pse database target: %s", destination)
+
+    def process_item(self, item):
+        if isinstance(item, PseCompanyItem):
+            self.companies.append(item)
+        elif isinstance(item, DividendItem):
+            self.dividends.append(item)
+        return item
+
+    def close_spider(self):
+        if not self.companies and not self.dividends:
+            return
+        try:
+            saved_companies, saved_dividends = database.save_pse_batch(
+                self.companies, self.dividends, logger=self.spider.logger
+            )
+        except database.BatchSaveError as error:
+            self.stats.inc_value("db/batches_failed")
+            path = self._write_dead_letter(error)
+            self.spider.logger.error(
+                "pse batch: all DB attempts failed, rows saved to %s (%s)",
+                path,
+                error,
+            )
+            return
+        self.stats.inc_value("db/batches_saved")
+        self.stats.inc_value("db/items_saved", saved_companies + saved_dividends)
+        try:
+            total_companies, total_dividends = database.count_pse_rows()
+        except Exception:  # noqa: BLE001 - reporting only
+            total_companies = total_dividends = -1
+        self.spider.logger.info(
+            "pse batch saved: %d companies, %d dividend rows "
+            "(DB now holds %d companies, %d dividend rows)",
+            saved_companies,
+            saved_dividends,
+            total_companies,
+            total_dividends,
+        )
+
+    def _write_dead_letter(self, error) -> Path:
+        FAILED_DIR.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        path = FAILED_DIR / f"pse-dividends-unknown-{stamp}.json"
+        payload = {
+            "source": "pse",
+            "batch_key": "dividends",
+            "failed_at": datetime.now().isoformat(timespec="seconds"),
+            "error": str(error),
+            "companies": [
+                ItemAdapter(item).asdict() for item in self.companies
+            ],
+            "items": [ItemAdapter(item).asdict() for item in self.dividends],
         }
         path.write_text(
             json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8"

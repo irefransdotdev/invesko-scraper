@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 import database
-from items import SOURCE_MUTUAL, SOURCE_UITF, NavpuItem
+from items import SOURCE_MUTUAL, SOURCE_UITF, DividendItem, NavpuItem, PseCompanyItem
 
 
 def fund_item(fund_id, name="Test Fund", **kw):
@@ -146,3 +146,83 @@ def test_funds_exist_flags(conn):
     assert database.funds_exist(SOURCE_UITF, bank_id=3) is True
     assert database.funds_exist(SOURCE_UITF, bank_id=14) is False
     assert database.funds_exist(SOURCE_MUTUAL) is False
+
+
+def dividend_item(**kw):
+    base = dict(
+        cmpy_id=86,
+        security_type="COMMON",
+        dividend_type="Cash",
+        dividend_rate="Php1.33",
+        ex_date="2026-05-04",
+        record_date="2026-05-05",
+        payment_date="2026-05-21",
+        circular_no="C02611-2026",
+        circular_ref="515cc3f7b32c0b1f64d70b69f0a3140b",
+        scraped_at="2026-10-07T00:00:00",
+    )
+    base.update(kw)
+    return DividendItem(**base)
+
+
+def company_item(**kw):
+    base = dict(cmpy_id=86, name="Jollibee Foods Corporation", symbol="JFC")
+    base.update(kw)
+    return PseCompanyItem(**base)
+
+
+def test_save_pse_batch_writes_both_tables(conn):
+    saved = database.save_pse_batch([company_item()], [dividend_item()])
+    assert saved == (1, 1)
+    company = conn.execute(
+        "SELECT name, symbol, sector, last_scraped_at FROM pse_companies"
+    ).fetchone()
+    assert company[:3] == ("Jollibee Foods Corporation", "JFC", "")
+    assert company[3]
+    row = conn.execute(
+        "SELECT security_type, ex_date, circular_no FROM pse_dividends"
+    ).fetchone()
+    assert row == ("COMMON", "2026-05-04", "C02611-2026")
+
+
+def test_save_pse_batch_is_idempotent(conn):
+    database.save_pse_batch([company_item()], [dividend_item()])
+    database.save_pse_batch(
+        [company_item(sector="Industrial")],
+        [dividend_item(dividend_rate="Php1.40")],
+    )
+    assert conn.execute("SELECT COUNT(*) FROM pse_companies").fetchone()[0] == 1
+    assert conn.execute("SELECT COUNT(*) FROM pse_dividends").fetchone()[0] == 1
+    sector = conn.execute("SELECT sector FROM pse_companies").fetchone()[0]
+    rate = conn.execute("SELECT dividend_rate FROM pse_dividends").fetchone()[0]
+    assert sector == "Industrial"
+    assert rate == "Php1.40"
+
+
+def test_save_pse_batch_null_keys_normalize_to_empty(conn):
+    database.save_pse_batch(
+        [],
+        [
+            dividend_item(
+                security_type=None,
+                ex_date=None,
+                circular_no=None,
+                record_date=None,
+            )
+        ],
+    )
+    database.save_pse_batch([], [dividend_item(security_type=None, ex_date=None, circular_no=None)])
+    assert conn.execute("SELECT COUNT(*) FROM pse_dividends").fetchone()[0] == 1
+    row = conn.execute(
+        "SELECT security_type, ex_date, circular_no FROM pse_dividends"
+    ).fetchone()
+    assert row == ("", "", "")
+
+
+def test_count_pse_rows(conn):
+    assert database.count_pse_rows() == (0, 0)
+    database.save_pse_batch(
+        [company_item(), company_item(cmpy_id=6, name="PLDT Inc.", symbol="TEL")],
+        [dividend_item(), dividend_item(cmpy_id=6, ex_date="2026-03-25")],
+    )
+    assert database.count_pse_rows() == (2, 2)

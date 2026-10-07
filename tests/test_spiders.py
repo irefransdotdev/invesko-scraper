@@ -1,12 +1,15 @@
-"""Spiders: uitf (daily, DB-driven work list) and uitf_discover (catalog)."""
+"""Spiders: uitf (daily, DB-driven work list), uitf_discover (catalog),
+and pse_dividends (PSE Edge company directory + dividends tabs)."""
 
 import asyncio
 import logging
 
+import scrapy
 from scrapy.http import HtmlResponse
 
 import database
-from items import SOURCE_UITF, NavpuItem
+from items import SOURCE_UITF, NavpuItem, PseCompanyItem
+from spiders.pse_dividends import PseDividendsSpider
 from spiders.uitf import UitfSpider
 from spiders.uitf_discover import UitfDiscoverSpider
 
@@ -136,3 +139,124 @@ def test_discover_empty_page_warns_without_crashing(db, caplog):
         for record in caplog.records
     )
     assert database.load_banks() == []
+
+
+PSE_COMPANY_HTML = """
+<span>[1/3] [Total 28]</span>
+<table class="list">
+<tbody>
+<tr>
+    <td><a href="#company" onclick='setCompany({company_id:"6",company_nm:"PLDT Inc."});return false;'>PLDT Inc.</a></td>
+    <td>TEL</td><td>Services</td>
+  </tr>
+<tr>
+    <td><a href="#company" onclick='setCompany({company_id:"86",company_nm:"Jollibee Foods Corporation"});return false;'>Jollibee Foods Corporation</a></td>
+    <td>JFC</td><td>Industrial</td>
+  </tr>
+</tbody>
+</table>
+"""
+
+PSE_DIVIDENDS_HTML = """
+<table class="list">
+<thead>
+  <tr>
+    <th>Type of Security</th><th>Type of Dividend</th><th>Dividend Rate</th>
+    <th>Ex-Dividend Date</th><th>Record Date</th><th>Payment Date</th>
+    <th>Circular Number</th>
+  </tr>
+</thead>
+<tbody>
+<tr>
+    <td class="alignC">COMMON</td>
+    <td class="alignC">Cash</td>
+    <td class="alignR">Php1.33</td>
+    <td class="alignC">May 04, 2026</td>
+    <td class="alignC">May 5, 2026</td>
+    <td class="alignC">May 21, 2026</td>
+    <td class="alignC"><a href="#viewer" onclick="openPopup('515cc3f7b32c0b1f64d70b69f0a3140b');return false;">C02611-2026</a></td>
+  </tr>
+</tbody>
+</table>
+"""
+
+
+def pse_company_response(html=PSE_COMPANY_HTML):
+    return HtmlResponse(
+        url="https://edge.pse.com.ph/cm/companySearch.ax",
+        body=html.encode("utf-8"),
+        encoding="utf-8",
+    )
+
+
+def pse_dividends_response(html=PSE_DIVIDENDS_HTML):
+    return HtmlResponse(
+        url="https://edge.pse.com.ph/companyPage/dividends_and_rights_list.ax",
+        body=html.encode("utf-8"),
+        encoding="utf-8",
+    )
+
+
+def form_fields(request):
+    from urllib.parse import parse_qs
+
+    return parse_qs(request.body.decode("utf-8"))
+
+
+def test_pse_start_requests_first_company_page():
+    requests = run_start(PseDividendsSpider())
+    assert len(requests) == 1
+    assert "companySearch.ax" in requests[0].url
+    assert form_fields(requests[0])["pNum"] == ["1"]
+
+
+def test_pse_parse_company_page_emits_items_and_dividend_requests():
+    spider = PseDividendsSpider()
+    output = list(spider.parse_company_page(pse_company_response()))
+
+    companies = [o for o in output if isinstance(o, PseCompanyItem)]
+    dividend_reqs = [
+        o
+        for o in output
+        if isinstance(o, scrapy.FormRequest) and "dividends" in o.url
+    ]
+    page_reqs = [
+        o
+        for o in output
+        if isinstance(o, scrapy.FormRequest) and "companySearch" in o.url
+    ]
+
+    assert [c.cmpy_id for c in companies] == [6, 86]
+    assert [form_fields(r)["cmpy_id"] for r in dividend_reqs] == [["6"], ["86"]]
+    assert dividend_reqs[0].cb_kwargs["company_name"] == "PLDT Inc."
+    # pages 2 and 3 follow page 1
+    assert [form_fields(r)["pNum"] for r in page_reqs] == [["2"], ["3"]]
+
+
+def test_pse_company_ids_filter(db):
+    spider = PseDividendsSpider(company_ids="86")
+    output = list(spider.parse_company_page(pse_company_response()))
+
+    companies = [o for o in output if isinstance(o, PseCompanyItem)]
+    dividend_reqs = [
+        o
+        for o in output
+        if isinstance(o, scrapy.FormRequest) and "dividends" in o.url
+    ]
+    # directory metadata for every company, dividend requests only for JFC
+    assert [c.cmpy_id for c in companies] == [6, 86]
+    assert [form_fields(r)["cmpy_id"] for r in dividend_reqs] == [["86"]]
+
+
+def test_pse_parse_dividends_yields_items():
+    spider = PseDividendsSpider()
+    rows = list(
+        spider.parse_dividends(
+            pse_dividends_response(), cmpy_id=86, company_name="Jollibee"
+        )
+    )
+    assert len(rows) == 1
+    assert rows[0].cmpy_id == 86
+    assert rows[0].security_type == "COMMON"
+    assert rows[0].ex_date == "2026-05-04"
+    assert rows[0].circular_no == "C02611-2026"
