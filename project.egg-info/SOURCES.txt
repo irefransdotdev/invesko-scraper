@@ -7,6 +7,7 @@ migrate_v2.py
 navpu_parsing.py
 pifa_parsing.py
 pipelines.py
+pse_edge_parsing.py
 reprocess_failed.py
 settings.py
 setup.py
@@ -18,6 +19,7 @@ project.egg-info/entry_points.txt
 project.egg-info/top_level.txt
 spiders/__init__.py
 spiders/pifa.py
+spiders/pse_dividends.py
 spiders/uitf.py
 spiders/uitf_discover.py
 tests/test_database.py

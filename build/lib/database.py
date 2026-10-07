@@ -6,6 +6,8 @@ Data model (v2):
   NULL for mutual funds.
 - navpu: LATEST-only measurements per fund, PRIMARY KEY (source, fund_id).
   Every scrape overwrites the fund's single row (new funds are inserted).
+- pse_companies / pse_dividends: PSE Edge listing metadata and dividend
+  history (pse_dividends PRIMARY KEY makes re-runs idempotent).
 """
 
 import time
@@ -56,6 +58,34 @@ SCHEMA_STATEMENTS = [
         roi_ytd REAL,
         scraped_at TEXT NOT NULL,
         PRIMARY KEY (source, fund_id)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS pse_companies (
+        cmpy_id INTEGER PRIMARY KEY,
+        name TEXT NOT NULL,
+        symbol TEXT,
+        sector TEXT,
+        last_scraped_at TEXT
+    )
+    """,
+    # Upsert key keeps re-runs idempotent: PSE occasionally revises a row
+    # (same company/security/ex-date/circular) and the update replaces it.
+    # Key columns are written as '' not NULL - SQLite treats NULLs in a
+    # PRIMARY KEY as distinct, which would duplicate rows on every run.
+    """
+    CREATE TABLE IF NOT EXISTS pse_dividends (
+        cmpy_id INTEGER NOT NULL,
+        security_type TEXT NOT NULL DEFAULT '',
+        dividend_type TEXT,
+        dividend_rate TEXT,
+        ex_date TEXT NOT NULL DEFAULT '',
+        record_date TEXT,
+        payment_date TEXT,
+        circular_no TEXT NOT NULL DEFAULT '',
+        circular_ref TEXT,
+        scraped_at TEXT NOT NULL,
+        PRIMARY KEY (cmpy_id, security_type, ex_date, circular_no)
     )
     """,
 ]
@@ -117,6 +147,31 @@ UPSERT_NAVPU_SQL = """
         roi_ytd = excluded.roi_ytd,
         scraped_at = excluded.scraped_at
     WHERE excluded.as_of_date >= navpu.as_of_date
+"""
+
+UPSERT_PSE_COMPANY_SQL = """
+    INSERT INTO pse_companies (cmpy_id, name, symbol, sector, last_scraped_at)
+    VALUES (?, ?, ?, ?, ?)
+    ON CONFLICT(cmpy_id) DO UPDATE SET
+        name = excluded.name,
+        symbol = excluded.symbol,
+        sector = excluded.sector,
+        last_scraped_at = excluded.last_scraped_at
+"""
+
+UPSERT_PSE_DIVIDEND_SQL = """
+    INSERT INTO pse_dividends (
+        cmpy_id, security_type, dividend_type, dividend_rate,
+        ex_date, record_date, payment_date, circular_no, circular_ref,
+        scraped_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(cmpy_id, security_type, ex_date, circular_no) DO UPDATE SET
+        dividend_type = excluded.dividend_type,
+        dividend_rate = excluded.dividend_rate,
+        record_date = excluded.record_date,
+        payment_date = excluded.payment_date,
+        circular_ref = excluded.circular_ref,
+        scraped_at = excluded.scraped_at
 """
 
 
@@ -219,6 +274,90 @@ def save_batch(
         f"source={source} batch={batch_key}: save failed after "
         f"{attempts} attempts: {last_error}"
     )
+
+
+def save_pse_batch(
+    companies: list,
+    dividends: list,
+    attempts: int = 4,
+    base_delay: float = 1.0,
+    logger=None,
+) -> tuple[int, int]:
+    """Upsert PSE company metadata and dividend rows in one transaction.
+
+    Same retry policy as save_batch: fresh connection per attempt, rollback
+    on failure, exponential backoff, BatchSaveError after the last attempt.
+    Returns (companies_saved, dividends_saved). Idempotent - re-running a
+    crawl overwrites the same rows instead of duplicating them.
+    """
+    scraped_at = datetime.now().isoformat(timespec="seconds")
+    last_error: Exception | None = None
+
+    for attempt in range(attempts):
+        conn = connect()
+        try:
+            for company in companies:
+                conn.execute(
+                    UPSERT_PSE_COMPANY_SQL,
+                    (
+                        int(company.cmpy_id),
+                        company.name,
+                        company.symbol or "",
+                        company.sector or "",
+                        scraped_at,
+                    ),
+                )
+            for row in dividends:
+                conn.execute(
+                    UPSERT_PSE_DIVIDEND_SQL,
+                    (
+                        int(row.cmpy_id),
+                        row.security_type or "",
+                        row.dividend_type,
+                        row.dividend_rate,
+                        row.ex_date or "",
+                        row.record_date,
+                        row.payment_date,
+                        row.circular_no or "",
+                        row.circular_ref,
+                        row.scraped_at or scraped_at,
+                    ),
+                )
+            conn.commit()
+            if logger and attempt:
+                logger.info(
+                    "pse batch saved after %d retries", attempt
+                )
+            return len(companies), len(dividends)
+        except Exception as error:  # noqa: BLE001 - retry on any DB error
+            last_error = error
+            _safe_rollback(conn)
+            if logger:
+                logger.warning(
+                    "pse batch DB save attempt %d/%d failed: %s",
+                    attempt + 1,
+                    attempts,
+                    error,
+                )
+            if attempt < attempts - 1:
+                time.sleep(base_delay * (2**attempt))
+        finally:
+            _safe_close(conn)
+
+    raise BatchSaveError(
+        f"pse batch: save failed after {attempts} attempts: {last_error}"
+    )
+
+
+def count_pse_rows() -> tuple[int, int]:
+    """(companies, dividends) row counts - used by the spider's end-of-run log."""
+    conn = connect()
+    try:
+        companies = conn.execute("SELECT COUNT(*) FROM pse_companies").fetchone()
+        dividends = conn.execute("SELECT COUNT(*) FROM pse_dividends").fetchone()
+        return int(companies[0]), int(dividends[0])
+    finally:
+        _safe_close(conn)
 
 
 def funds_exist(source: str, bank_id: int | None = None) -> bool:

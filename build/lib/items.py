@@ -28,6 +28,28 @@ class NavpuItem:
 
 
 @dataclass
+class PseCompanyItem:
+    cmpy_id: int
+    name: str
+    symbol: str | None = None
+    sector: str | None = None
+
+
+@dataclass
+class DividendItem:
+    cmpy_id: int
+    security_type: str | None = None
+    dividend_type: str | None = None
+    dividend_rate: str | None = None
+    ex_date: str | None = None
+    record_date: str | None = None
+    payment_date: str | None = None
+    circular_no: str | None = None
+    circular_ref: str | None = None
+    scraped_at: str | None = None
+
+
+@dataclass
 class BatchDoneItem:
     """Marker: all funds for one scrape batch have been yielded.
 

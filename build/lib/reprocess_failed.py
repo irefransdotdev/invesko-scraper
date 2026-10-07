@@ -14,7 +14,7 @@ import sys
 from pathlib import Path
 
 import database
-from items import SOURCE_UITF
+from items import SOURCE_UITF, DividendItem, PseCompanyItem
 
 FAILED_DIR = Path(__file__).resolve().parent / "output" / "failed"
 DONE_DIR = FAILED_DIR / "done"
@@ -35,14 +35,30 @@ def main() -> int:
         batch_key = str(data.get("batch_key") or data.get("bank_id"))
         batch_name = data.get("batch_name") or data.get("bank_name")
         as_of_date = data.get("as_of_date")
-        items = [
-            database_item_from_dict(entry) for entry in data.get("items", [])
-        ]
+        items = None
+        if source != "pse":
+            items = [
+                database_item_from_dict(entry)
+                for entry in data.get("items", [])
+            ]
         label = f"{source}/{batch_key} ({as_of_date})"
         try:
-            saved = database.save_batch(
-                source, batch_key, batch_name, as_of_date, items
-            )
+            if source == "pse":
+                saved_companies, saved_dividends = database.save_pse_batch(
+                    [
+                        PseCompanyItem(**entry)
+                        for entry in data.get("companies", [])
+                    ],
+                    [
+                        DividendItem(**entry)
+                        for entry in data.get("items", [])
+                    ],
+                )
+                saved = f"{saved_companies} companies, {saved_dividends} dividends"
+            else:
+                saved = database.save_batch(
+                    source, batch_key, batch_name, as_of_date, items
+                )
             shutil.move(file_path, str(DONE_DIR / Path(file_path).name))
             ok += 1
             print(f"saved {label}: {saved} rows -> moved to done/")

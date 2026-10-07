@@ -17,6 +17,7 @@ setup(
         'migrate_v2',
         'navpu_parsing',
         'pifa_parsing',
+        'pse_edge_parsing',
         'pipelines',
         'reprocess_failed',
         'settings',
