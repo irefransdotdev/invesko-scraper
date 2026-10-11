@@ -67,6 +67,7 @@ DOWNLOAD_DELAY_JITTER = 0
 ITEM_PIPELINES = {
     "pipelines.NavpuDatabasePipeline": 300,
     "pipelines.PseDividendsPipeline": 310,
+    "pipelines.PseDividendsFeedPipeline": 320,
 }
 
 # HTTP-level retries (network errors, 429/5xx) - separate from DB save retries

@@ -259,3 +259,39 @@ def test_count_pse_rows(conn):
         [dividend_item(), dividend_item(cmpy_id=6, ex_date="2026-03-25")],
     )
     assert database.count_pse_rows() == (2, 2)
+
+
+def test_save_pse_feed_insert_only_never_updates(conn):
+    database.save_pse_batch([company_item()], [dividend_item()])
+    # Same circular with a revised rate + a brand-new circular
+    saved = database.save_pse_feed(
+        [],
+        [
+            dividend_item(dividend_rate="Php1.40"),
+            dividend_item(
+                ex_date="2026-08-01", circular_no="C08000-2026",
+                dividend_rate="Php2.00",
+            ),
+        ],
+    )
+    assert saved == (0, 1)  # only the new row was inserted
+    rows = conn.execute(
+        "SELECT ex_date, dividend_rate FROM pse_dividends ORDER BY ex_date"
+    ).fetchall()
+    assert rows == [
+        ("2026-05-04", "Php1.33"),  # original untouched, not revised
+        ("2026-08-01", "Php2.00"),
+    ]
+
+
+def test_save_pse_feed_company_meta_preserves_symbol(conn):
+    database.save_pse_batch([company_item()], [])
+    database.save_pse_feed(
+        [PseCompanyItem(cmpy_id=86, name="Jollibee Foods Corp.")], []
+    )
+    name, symbol, sector = conn.execute(
+        "SELECT name, symbol, sector FROM pse_companies"
+    ).fetchone()
+    assert name == "Jollibee Foods Corp."  # name refreshed from the feed
+    assert symbol == "JFC"  # never nulled out by feed-only metadata
+    assert sector == ""

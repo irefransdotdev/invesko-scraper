@@ -174,6 +174,31 @@ UPSERT_PSE_DIVIDEND_SQL = """
         scraped_at = excluded.scraped_at
 """
 
+# Insert-only: used by the current-month feed spider so rows already stored
+# by the full pse_dividends crawl are never touched (no updates, no
+# scraped_at churn) - only brand-new circulars are added.
+INSERT_PSE_DIVIDEND_SQL = """
+    INSERT INTO pse_dividends (
+        cmpy_id, security_type, dividend_type, dividend_rate,
+        ex_date, record_date, payment_date, circular_no, circular_ref,
+        scraped_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(cmpy_id, security_type, ex_date, circular_no) DO NOTHING
+"""
+
+# Feed-sourced company metadata: names only, never nulling out the
+# symbol/sector columns owned by the full company-directory crawl.
+UPSERT_PSE_COMPANY_META_SQL = """
+    INSERT INTO pse_companies (cmpy_id, name, symbol, sector, last_scraped_at)
+    VALUES (?, ?, NULL, NULL, ?)
+    ON CONFLICT(cmpy_id) DO UPDATE SET
+        name = CASE
+            WHEN excluded.name = '' THEN pse_companies.name
+            ELSE excluded.name
+        END,
+        last_scraped_at = excluded.last_scraped_at
+"""
+
 
 class BatchSaveError(Exception):
     """Raised when a scrape batch could not be saved after all retries."""
@@ -346,6 +371,74 @@ def save_pse_batch(
 
     raise BatchSaveError(
         f"pse batch: save failed after {attempts} attempts: {last_error}"
+    )
+
+
+def save_pse_feed(
+    companies: list,
+    dividends: list,
+    attempts: int = 4,
+    base_delay: float = 1.0,
+    logger=None,
+) -> tuple[int, int]:
+    """Save current-month feed rows: upsert company names, insert-only dividends.
+
+    Same retry policy as save_pse_batch. Existing dividend rows are never
+    modified (ON CONFLICT DO NOTHING) - only circulars the DB has not seen
+    before are inserted. Returns (companies_saved, dividends_inserted).
+    """
+    scraped_at = datetime.now().isoformat(timespec="seconds")
+    last_error: Exception | None = None
+
+    for attempt in range(attempts):
+        conn = connect()
+        try:
+            for company in companies:
+                conn.execute(
+                    UPSERT_PSE_COMPANY_META_SQL,
+                    (int(company.cmpy_id), company.name or "", scraped_at),
+                )
+            inserted = 0
+            for row in dividends:
+                cursor = conn.execute(
+                    INSERT_PSE_DIVIDEND_SQL,
+                    (
+                        int(row.cmpy_id),
+                        row.security_type or "",
+                        row.dividend_type,
+                        row.dividend_rate,
+                        row.ex_date or "",
+                        row.record_date,
+                        row.payment_date,
+                        row.circular_no or "",
+                        row.circular_ref,
+                        row.scraped_at or scraped_at,
+                    ),
+                )
+                inserted += max(getattr(cursor, "rowcount", 0) or 0, 0)
+            conn.commit()
+            if logger and attempt:
+                logger.info(
+                    "pse feed saved after %d retries", attempt
+                )
+            return len(companies), inserted
+        except Exception as error:  # noqa: BLE001 - retry on any DB error
+            last_error = error
+            _safe_rollback(conn)
+            if logger:
+                logger.warning(
+                    "pse feed DB save attempt %d/%d failed: %s",
+                    attempt + 1,
+                    attempts,
+                    error,
+                )
+            if attempt < attempts - 1:
+                time.sleep(base_delay * (2**attempt))
+        finally:
+            _safe_close(conn)
+
+    raise BatchSaveError(
+        f"pse feed: save failed after {attempts} attempts: {last_error}"
     )
 
 

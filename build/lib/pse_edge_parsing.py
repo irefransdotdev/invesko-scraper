@@ -19,10 +19,19 @@ DIVIDENDS_URL = (
     f"{BASE_URL}/companyPage/dividends_and_rights_list.ax"
     "?DividendsOrRights=Dividends"
 )
+# Market-wide dividend announcements feed (all companies in one list,
+# sorted by payment date DESC, ~50 rows/page). Used by the
+# pse_dividends_current_month spider.
+DIVIDENDS_FEED_URL = (
+    f"{BASE_URL}/disclosureData/dividends_and_rights_info_list.ax"
+    "?DividendsOrRights=Dividends"
+)
 
 SET_COMPANY_RE = re.compile(r'setCompany\(\{company_id:"(\d+)"')
 PAGER_RE = re.compile(r"\[(\d+)/(\d+)\]\s*\[Total\s+(\d+)\]")
+FEED_PAGER_RE = re.compile(r"\[\s*(\d+)\s*/\s*(\d+)\s*\]\s*\[Total\s+(\d+)\]")
 POPUP_RE = re.compile(r"openPopup\('([0-9a-f]+)'\)")
+CMPY_ID_RE = re.compile(r"cmpy_id=(\d+)")
 
 
 def to_iso(date_str: str | None) -> str | None:
@@ -98,3 +107,55 @@ def parse_dividends(response, cmpy_id: int) -> list[DividendItem]:
 
 def _cell_text(cell) -> str:
     return " ".join(cell.xpath("string(.)").getall()).replace("\xa0", " ").strip()
+
+
+def parse_dividends_feed(
+    response,
+) -> tuple[list[PseCompanyItem], list[DividendItem], int]:
+    """One page of the market-wide dividends feed.
+
+    Returns (companies, dividends, total_pages). Companies are deduped by
+    cmpy_id (the feed repeats them per row) with symbol/sector left unset -
+    the feed only carries names. total_pages comes from the '[1 / 11]
+    [Total 515]' counter.
+    """
+    total_pages = 1
+    match = FEED_PAGER_RE.search(response.text)
+    if match:
+        total_pages = int(match.group(2))
+
+    companies: dict[int, PseCompanyItem] = {}
+    dividends: list[DividendItem] = []
+    for row in response.css("table.list tbody tr"):
+        cells = row.xpath("./td")
+        if len(cells) < 8:
+            continue
+        link = cells[0].xpath(".//a")
+        href = (link.xpath("./@href").get() or "") if link else ""
+        id_match = CMPY_ID_RE.search(href)
+        if not id_match:
+            continue
+        cmpy_id = int(id_match.group(1))
+        name = " ".join(link.xpath(".//text()").getall()).strip() if link else ""
+        if cmpy_id not in companies:
+            companies[cmpy_id] = PseCompanyItem(cmpy_id=cmpy_id, name=name)
+
+        circular_cell = cells[7]
+        popup = POPUP_RE.search(
+            circular_cell.xpath(".//a/@onclick").get() or ""
+        )
+        dividends.append(
+            DividendItem(
+                cmpy_id=cmpy_id,
+                security_type=_cell_text(cells[1]) or None,
+                dividend_type=_cell_text(cells[2]) or None,
+                dividend_rate=_cell_text(cells[3]) or None,
+                ex_date=to_iso(_cell_text(cells[4])),
+                record_date=to_iso(_cell_text(cells[5])),
+                payment_date=to_iso(_cell_text(cells[6])),
+                circular_no=_cell_text(circular_cell) or None,
+                circular_ref=popup.group(1) if popup else None,
+                scraped_at=datetime.now().isoformat(timespec="seconds"),
+            )
+        )
+    return list(companies.values()), dividends, total_pages

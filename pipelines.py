@@ -167,7 +167,13 @@ class PseDividendsPipeline:
 
     Shares the retry + dead-letter policy of NavpuDatabasePipeline. Items
     of other types (NAVPU) pass through untouched, and vice versa.
+
+    Only handles items from the pse_dividends spider; the
+    pse_dividends_current_month spider's items pass through to
+    PseDividendsFeedPipeline (insert-only) instead.
     """
+
+    handles_spider = "pse_dividends"
 
     @classmethod
     def from_crawler(cls, crawler):
@@ -190,6 +196,8 @@ class PseDividendsPipeline:
         self.spider.logger.info("pse database target: %s", destination)
 
     def process_item(self, item):
+        if getattr(self.spider, "name", None) != self.handles_spider:
+            return item
         if isinstance(item, PseCompanyItem):
             self.companies.append(item)
         elif isinstance(item, DividendItem):
@@ -234,6 +242,63 @@ class PseDividendsPipeline:
         payload = {
             "source": "pse",
             "batch_key": "dividends",
+            "failed_at": datetime.now().isoformat(timespec="seconds"),
+            "error": str(error),
+            "companies": [
+                ItemAdapter(item).asdict() for item in self.companies
+            ],
+            "items": [ItemAdapter(item).asdict() for item in self.dividends],
+        }
+        path.write_text(
+            json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8"
+        )
+        return path
+
+
+class PseDividendsFeedPipeline(PseDividendsPipeline):
+    """Insert-only save for the pse_dividends_current_month spider.
+
+    Company names are upserted (never touching symbol/sector); dividend
+    rows already in the DB are skipped instead of updated, so this spider
+    can run on the daily cron without ever revising existing data.
+    """
+
+    handles_spider = "pse_dividends_current_month"
+
+    def close_spider(self):
+        if not self.companies and not self.dividends:
+            return
+        try:
+            saved_companies, inserted_dividends = database.save_pse_feed(
+                self.companies, self.dividends, logger=self.spider.logger
+            )
+        except database.BatchSaveError as error:
+            self.stats.inc_value("db/batches_failed")
+            path = self._write_dead_letter(error)
+            self.spider.logger.error(
+                "pse feed: all DB attempts failed, rows saved to %s (%s)",
+                path,
+                error,
+            )
+            return
+        self.stats.inc_value("db/batches_saved")
+        self.stats.inc_value(
+            "db/items_saved", saved_companies + inserted_dividends
+        )
+        self.spider.logger.info(
+            "pse feed saved: %d company names upserted, %d new dividend rows "
+            "inserted (existing rows untouched)",
+            saved_companies,
+            inserted_dividends,
+        )
+
+    def _write_dead_letter(self, error) -> Path:
+        FAILED_DIR.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        path = FAILED_DIR / f"pse-feed-unknown-{stamp}.json"
+        payload = {
+            "source": "pse",
+            "batch_key": "dividends_feed",
             "failed_at": datetime.now().isoformat(timespec="seconds"),
             "error": str(error),
             "companies": [

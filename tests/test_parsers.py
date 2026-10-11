@@ -6,7 +6,11 @@ from scrapy.http import HtmlResponse
 from items import BatchDoneItem, NavpuItem
 from navpu_parsing import parse_navpu_page
 from pifa_parsing import parse_pifa_page
-from pse_edge_parsing import parse_company_search, parse_dividends
+from pse_edge_parsing import (
+    parse_company_search,
+    parse_dividends,
+    parse_dividends_feed,
+)
 
 UITF_HTML = """
 <html><body>
@@ -362,3 +366,109 @@ def test_pse_dividends_no_data_yields_empty_list():
         PSE_DIVIDENDS_EMPTY_HTML,
     )
     assert parse_dividends(response, cmpy_id=55) == []
+
+
+PSE_FEED_HTML = """
+<script type="text/javascript">
+function goPage(val){
+  $("#pageNum").val(val);
+  searchList({url:'/disclosureData/dividends_and_rights_info_list.ax?DividendsOrRights=Dividends',form:'#listForm'});
+}
+</script>
+<form id="listForm">
+  <input type="hidden" name="pageNum" id="pageNum" value=""/>
+</form>
+<span class="count">
+[1 / 3]
+[Total 515]
+</span>
+<table class="list">
+<thead>
+  <tr>
+    <th>Company Name</th><th>Type of Security</th><th>Type of Dividend</th>
+    <th>Dividend Rate</th><th>Ex-Dividend Date</th><th>Record Date</th>
+    <th>Payment Date</th><th>Circular Number</th>
+  </tr>
+</thead>
+<tbody>
+<tr>
+    <td><a href="/companyInformation/form.do?cmpy_id=13">A Brown Company, Inc.</a></td>
+    <td class="alignC">BRNPB Series B</td>
+    <td class="alignC">Cash</td>
+    <td class="alignR">Php 2.0625 per share</td>
+    <td class="alignC">Feb 08, 2027</td>
+    <td class="alignC">Feb 9, 2027</td>
+    <td class="alignC">Feb 23, 2027</td>
+    <td class="alignC"><a href="#viewer" onclick="openPopup('f6547bd542fbf07f64d70b69f0a3140b');return false;">C00595-2026</a></td>
+  </tr>
+<tr>
+    <td><a href="/companyInformation/form.do?cmpy_id=13">A Brown Company, Inc.</a></td>
+    <td class="alignC">BRNPC Series C</td>
+    <td class="alignC">Cash</td>
+    <td class="alignR">Php 2.1875 per share</td>
+    <td class="alignC">Feb 08, 2027</td>
+    <td class="alignC">Feb 9, 2027</td>
+    <td class="alignC">Feb 23, 2027</td>
+    <td class="alignC"><a href="#viewer" onclick="openPopup('2722e0a2a8686c9864d70b69f0a3140b');return false;">C00592-2026</a></td>
+  </tr>
+<tr>
+    <td><a href="/companyInformation/form.do?cmpy_id=197">First Philippine Holdings Corporation</a></td>
+    <td class="alignC">COMMON</td>
+    <td class="alignC">Cash</td>
+    <td class="alignR">Php1.10</td>
+    <td class="alignC">Nov 20, 2026</td>
+    <td class="alignC">Nov 23, 2026</td>
+    <td class="alignC">Dec 15, 2026</td>
+    <td class="alignC"><a href="#viewer" onclick="openPopup('19504292781ea57a64d70b69f0a3140b');return false;">C07164-2026</a></td>
+  </tr>
+</tbody>
+</table>
+"""
+
+PSE_FEED_EMPTY_HTML = """
+<span class="count">[1 / 1] [Total 0]</span>
+<table class="list">
+<tbody>
+<tr><td colspan="8" class="alignC">no data.</td></tr>
+</tbody>
+</table>
+"""
+
+
+def test_pse_feed_parses_rows_dedupes_companies_and_pager():
+    response = make_response(
+        "https://edge.pse.com.ph/disclosureData/dividends_and_rights_info_list.ax",
+        PSE_FEED_HTML,
+    )
+    companies, dividends, total_pages = parse_dividends_feed(response)
+
+    assert total_pages == 3
+    assert [c.cmpy_id for c in companies] == [13, 197]
+    assert companies[0].name == "A Brown Company, Inc."
+    assert companies[0].symbol is None  # feed carries names only
+    assert companies[1].name == "First Philippine Holdings Corporation"
+
+    assert len(dividends) == 3
+    first = dividends[0]
+    assert first.cmpy_id == 13
+    assert first.security_type == "BRNPB Series B"
+    assert first.dividend_type == "Cash"
+    assert first.dividend_rate == "Php 2.0625 per share"
+    assert first.ex_date == "2027-02-08"
+    assert first.record_date == "2027-02-09"
+    assert first.payment_date == "2027-02-23"
+    assert first.circular_no == "C00595-2026"
+    assert first.circular_ref == "f6547bd542fbf07f64d70b69f0a3140b"
+    assert dividends[2].cmpy_id == 197
+    assert dividends[2].payment_date == "2026-12-15"
+
+
+def test_pse_feed_empty_table():
+    response = make_response(
+        "https://edge.pse.com.ph/disclosureData/dividends_and_rights_info_list.ax",
+        PSE_FEED_EMPTY_HTML,
+    )
+    companies, dividends, total_pages = parse_dividends_feed(response)
+    assert companies == []
+    assert dividends == []
+    assert total_pages == 1

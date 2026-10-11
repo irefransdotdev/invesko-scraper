@@ -5,13 +5,15 @@
 import asyncio
 import logging
 
+import pytest
 import scrapy
 from scrapy.http import HtmlResponse
 
 import database
-from items import SOURCE_MUTUAL, SOURCE_UITF, NavpuItem, PseCompanyItem
+from items import SOURCE_MUTUAL, SOURCE_UITF, DividendItem, NavpuItem, PseCompanyItem
 from spiders.pifa import PifaSpider
 from spiders.pse_dividends import PseDividendsSpider
+from spiders.pse_dividends_current_month import PseDividendsCurrentMonthSpider
 from spiders.uitf import UitfSpider
 from spiders.uitf_discover import UitfDiscoverSpider
 
@@ -422,3 +424,102 @@ def test_pifa_force_yields_when_unchanged(db):
     spider = PifaSpider(force="true")
     output = list(spider.parse(pifa_response()))
     assert any(isinstance(o, NavpuItem) for o in output)
+
+
+FEED_ROW = """
+<tr>
+    <td><a href="/companyInformation/form.do?cmpy_id={cmpy_id}">{name}</a></td>
+    <td class="alignC">{security}</td>
+    <td class="alignC">Cash</td>
+    <td class="alignR">Php1.00</td>
+    <td class="alignC">{ex}</td>
+    <td class="alignC">{record}</td>
+    <td class="alignC">{payment}</td>
+    <td class="alignC"><a href="#viewer" onclick="openPopup('{ref}');return false;">{circular}</a></td>
+</tr>
+"""
+
+
+def feed_page(rows, page=1, total_pages=3):
+    body = (
+        f'<span class="count">[{page} / {total_pages}] [Total 120]</span>'
+        '<table class="list"><tbody>' + "".join(rows) + "</tbody></table>"
+    )
+    return HtmlResponse(
+        url="https://edge.pse.com.ph/disclosureData/dividends_and_rights_info_list.ax",
+        body=body.encode("utf-8"),
+        encoding="utf-8",
+    )
+
+
+def feed_row(cmpy_id=13, name="A Brown Company, Inc.", security="COMMON",
+             ex="Feb 08, 2027", record="Feb 9, 2027", payment="Feb 23, 2027",
+             circular="C00595-2026", ref="f6547bd542fbf07f64d70b69f0a3140b"):
+    return FEED_ROW.format(
+        cmpy_id=cmpy_id, name=name, security=security, ex=ex, record=record,
+        payment=payment, circular=circular, ref=ref,
+    )
+
+
+def test_feed_spider_start_posts_first_page():
+    spider = PseDividendsCurrentMonthSpider(month="2026-10")
+    requests = run_start(spider)
+    assert len(requests) == 1
+    assert "dividends_and_rights_info_list.ax" in requests[0].url
+    fields = form_fields(requests[0])
+    assert fields["pageNum"] == ["1"]
+    assert fields["sortMode"] == ["date"]
+    assert fields["dateSortType"] == ["DESC"]
+
+
+def test_feed_spider_keeps_current_and_future_rows_and_follows_page():
+    spider = PseDividendsCurrentMonthSpider(month="2026-10")
+    assert spider.cutoff == "2026-10-01"
+    output = list(
+        spider.parse_feed(
+            feed_page(
+                [
+                    feed_row(payment="Feb 23, 2027"),  # future - new circular
+                    feed_row(circular="C00100-2026", payment="Oct 15, 2026"),
+                    feed_row(circular="C00099-2026", payment="Sep 30, 2026"),
+                ]
+            ),
+            page=1,
+        )
+    )
+    dividends = [o for o in output if isinstance(o, DividendItem)]
+    companies = [o for o in output if isinstance(o, PseCompanyItem)]
+    page_reqs = [
+        o for o in output if isinstance(o, scrapy.FormRequest)
+    ]
+    assert [d.circular_no for d in dividends] == ["C00595-2026", "C00100-2026"]
+    assert [c.cmpy_id for c in companies] == [13]
+    assert len(page_reqs) == 1
+    assert form_fields(page_reqs[0])["pageNum"] == ["2"]
+
+
+def test_feed_spider_stops_at_first_page_with_only_old_rows():
+    spider = PseDividendsCurrentMonthSpider(month="2026-10")
+    output = list(
+        spider.parse_feed(
+            feed_page(
+                [
+                    feed_row(payment="Sep 30, 2026"),
+                    feed_row(circular="C00098-2026", payment="Aug 01, 2026"),
+                ]
+            ),
+            page=1,
+        )
+    )
+    assert [o for o in output if isinstance(o, DividendItem)] == []
+    assert not any(isinstance(o, scrapy.FormRequest) for o in output)
+
+
+def test_feed_spider_month_arg_overrides_cutoff():
+    spider = PseDividendsCurrentMonthSpider(month="2026-08")
+    assert spider.cutoff == "2026-08-01"
+
+
+def test_feed_spider_rejects_bad_month():
+    with pytest.raises(ValueError, match="expected YYYY-MM"):
+        PseDividendsCurrentMonthSpider(month="August 2026")

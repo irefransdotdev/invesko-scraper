@@ -12,7 +12,14 @@ from scrapy.settings import Settings
 
 import database
 import pipelines
-from items import SOURCE_MUTUAL, SOURCE_UITF, BatchDoneItem, NavpuItem
+from items import (
+    SOURCE_MUTUAL,
+    SOURCE_UITF,
+    BatchDoneItem,
+    DividendItem,
+    NavpuItem,
+    PseCompanyItem,
+)
 from reprocess_failed import database_item_from_dict
 
 

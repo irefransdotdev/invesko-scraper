@@ -20,6 +20,7 @@ project.egg-info/top_level.txt
 spiders/__init__.py
 spiders/pifa.py
 spiders/pse_dividends.py
+spiders/pse_dividends_current_month.py
 spiders/uitf.py
 spiders/uitf_discover.py
 tests/test_database.py
