@@ -382,6 +382,25 @@ def funds_exist(source: str, bank_id: int | None = None) -> bool:
         _safe_close(conn)
 
 
+def get_latest_as_of_date(source: str) -> str | None:
+    """Newest as_of_date stored in navpu for this source ('uitf' or 'mutual').
+
+    The daily spiders use this before scraping: if the site's "as of" date
+    has not advanced past what we already hold, they skip the full scrape.
+    Returns None when the source has no rows (or only blank dates).
+    """
+    conn = connect()
+    try:
+        row = conn.execute(
+            "SELECT MAX(as_of_date) FROM navpu "
+            "WHERE source = ? AND as_of_date != ''",
+            (source,),
+        ).fetchone()
+        return row[0] if row and row[0] else None
+    finally:
+        _safe_close(conn)
+
+
 def load_banks() -> list[tuple[int, str | None]]:
     """All known fund providers as (bank_id, name), ordered by bank_id.
 

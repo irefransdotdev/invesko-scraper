@@ -148,6 +148,39 @@ def test_funds_exist_flags(conn):
     assert database.funds_exist(SOURCE_MUTUAL) is False
 
 
+def test_get_latest_as_of_date_empty(db):
+    assert database.get_latest_as_of_date(SOURCE_UITF) is None
+    assert database.get_latest_as_of_date(SOURCE_MUTUAL) is None
+
+
+def test_get_latest_as_of_date_per_source(conn):
+    database.save_batch(SOURCE_UITF, "3", "BPI", "2026-10-09", [fund_item(10)])
+    database.save_batch(
+        SOURCE_MUTUAL, "pifa", "PIFA", "2026-10-02",
+        [fund_item(7, source=SOURCE_MUTUAL, batch_key="pifa", batch_name="PIFA")],
+    )
+    assert database.get_latest_as_of_date(SOURCE_UITF) == "2026-10-09"
+    assert database.get_latest_as_of_date(SOURCE_MUTUAL) == "2026-10-02"
+
+
+def test_get_latest_as_of_date_blank_ignored(conn):
+    database.save_batch(
+        SOURCE_UITF, "3", "BPI", "", [fund_item(10, as_of_date="")]
+    )
+    assert database.get_latest_as_of_date(SOURCE_UITF) is None
+    database.save_batch(SOURCE_UITF, "3", "BPI", "2026-10-09", [fund_item(11)])
+    assert database.get_latest_as_of_date(SOURCE_UITF) == "2026-10-09"
+
+
+def test_get_latest_as_of_date_max_across_funds(conn):
+    database.save_batch(SOURCE_UITF, "3", "BPI", "2026-10-02", [fund_item(10)])
+    database.save_batch(
+        SOURCE_UITF, "7", "China", "2026-10-09",
+        [fund_item(11, batch_key="7", batch_name="China")],
+    )
+    assert database.get_latest_as_of_date(SOURCE_UITF) == "2026-10-09"
+
+
 def dividend_item(**kw):
     base = dict(
         cmpy_id=86,
