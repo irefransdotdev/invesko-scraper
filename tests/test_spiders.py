@@ -14,7 +14,7 @@ from items import SOURCE_MUTUAL, SOURCE_UITF, DividendItem, NavpuItem, PseCompan
 from spiders.pifa import PifaSpider
 from spiders.pse_dividends import PseDividendsSpider
 from spiders.pse_dividends_current_month import PseDividendsCurrentMonthSpider
-from spiders.uitf import UitfSpider
+from spiders.uitf import UitfSpider, manila_today
 from spiders.uitf_discover import UitfDiscoverSpider
 
 PROVIDERS_HTML = """
@@ -266,14 +266,6 @@ def test_pse_parse_dividends_yields_items():
     assert rows[0].circular_no == "C02611-2026"
 
 
-UITF_PROBE_HTML = """
-<html><body>
-<section class="page-content">
-  <h2>Unit Investment Trust Funds - NAVpus as of Oct 9, 2026</h2>
-</section>
-</body></html>
-"""
-
 PIFA_PAGE_HTML = """
 <html><body>
 <div class="elementor-text-editor">As of <strong>10/09/2026</strong></div>
@@ -293,14 +285,6 @@ PIFA_PAGE_HTML = """
 </table>
 </body></html>
 """
-
-
-def probe_response(html=UITF_PROBE_HTML):
-    return HtmlResponse(
-        url="https://uitf.com.ph/daily_navpu.php",
-        body=html.encode("utf-8"),
-        encoding="utf-8",
-    )
 
 
 def pifa_response(html=PIFA_PAGE_HTML):
@@ -326,84 +310,160 @@ def seed_navpu(source, as_of, fund_id=10, **kw):
     database.save_batch(source, batch_key, batch_name, as_of, [item])
 
 
-def test_uitf_probes_first_when_db_has_date(db):
-    seed_banks((3, "BPI WEALTH"), (7, "China Banking Corporation"))
-    seed_navpu(SOURCE_UITF, "2026-10-09")
-    requests = run_start(UitfSpider())
-    assert len(requests) == 1
-    assert requests[0].url == "https://uitf.com.ph/daily_navpu.php"
-    assert requests[0].callback.__name__ == "parse_probe"
+UITF_PAGE_HTML = """
+<html><body>
+<section class="page-content">
+  <h2>Unit Investment Trust Funds - Net Asset Values per unit (UITF NAVpus) as of {date}</h2>
+  <div class="table-title"><h3>Equity Fund</h3><img src="/img/peso.png"/></div>
+  <table><tbody>
+    <tr>
+      <td><a href="details.php?fund_id=48">Test Equity Fund</a></td>
+      <td>123.45</td><td>5.5</td><td>-2.1</td>
+    </tr>
+  </tbody></table>
+</section>
+<select name="bank_id"><option value="3">BPI Trust</option></select>
+</body></html>
+"""
 
-
-def test_uitf_probe_unchanged_date_skips_banks(db, caplog):
-    seed_navpu(SOURCE_UITF, "2026-10-09")
-    spider = UitfSpider()
-    spider.selected = [(3, "BPI WEALTH"), (7, "China Banking Corporation")]
-    with caplog.at_level(logging.INFO, logger="uitf"):
-        output = list(spider.parse_probe(probe_response()))
-    assert output == []
-    assert any("up to date" in record.getMessage() for record in caplog.records)
-
-
-def test_uitf_probe_stale_site_date_skips_banks(db, caplog):
-    seed_navpu(SOURCE_UITF, "2026-10-09")
-    spider = UitfSpider()
-    spider.selected = [(3, "BPI WEALTH")]
-    stale = probe_response(
-        UITF_PROBE_HTML.replace("Oct 9, 2026", "Oct 8, 2026")
+def uitf_response(html=None, bank_id=3):
+    return HtmlResponse(
+        url=f"https://uitf.com.ph/daily_navpu.php?bank_id={bank_id}",
+        body=(html or UITF_PAGE_HTML).encode("utf-8"),
+        encoding="utf-8",
     )
+
+
+def uitf_requests(db_date, force=""):
+    """Seed banks + navpu, start the spider, return (spider, requests)."""
+    seed_banks((3, "BPI WEALTH"), (7, "China Banking Corporation"))
+    seed_navpu(SOURCE_UITF, db_date, batch_name="BPI WEALTH")
+    spider = UitfSpider(force=force)
+    return spider, run_start(spider)
+
+
+def test_uitf_skips_when_db_as_of_is_today(db, caplog):
     with caplog.at_level(logging.INFO, logger="uitf"):
-        output = list(spider.parse_probe(stale))
-    assert output == []
-    assert any("up to date" in record.getMessage() for record in caplog.records)
+        _, requests = uitf_requests(manila_today())
+    assert requests == []
+    logs = [r.getMessage() for r in caplog.records]
+    assert any(
+        f"DB as-of date: {manila_today()}, today: {manila_today()}" in m
+        for m in logs
+    )
+    assert any("up to date" in m for m in logs)
 
 
-def test_uitf_probe_newer_date_yields_banks(db, caplog):
-    seed_navpu(SOURCE_UITF, "2026-10-08")
+def test_uitf_probes_freshest_bank_when_db_behind_today(db):
+    seed_banks((3, "BPI WEALTH"), (7, "China Banking Corporation"))
+    seed_navpu(SOURCE_UITF, "2026-08-11", batch_name="BPI WEALTH")
+    seed_navpu(
+        SOURCE_UITF, "2026-08-12", fund_id=20,
+        batch_key="7", batch_name="China Banking Corporation",
+    )
     spider = UitfSpider()
-    spider.selected = [(3, "BPI WEALTH"), (7, "China Banking Corporation")]
-    with caplog.at_level(logging.INFO, logger="uitf"):
-        output = list(spider.parse_probe(probe_response()))
-    assert [r.url for r in output] == [
-        "https://uitf.com.ph/daily_navpu.php?bank_id=3",
-        "https://uitf.com.ph/daily_navpu.php?bank_id=7",
+    requests = run_start(spider)
+    # bank 7 published most recently in the DB - it is the probe target
+    assert [r.url for r in requests] == [
+        "https://uitf.com.ph/daily_navpu.php?bank_id=7"
     ]
-    assert any("new data" in record.getMessage() for record in caplog.records)
+    assert requests[0].callback.__name__ == "parse_probe"
+    assert requests[0].cb_kwargs["bank_name"] == "China Banking Corporation"
+    assert spider.remaining_banks == [(3, "BPI WEALTH")]
+
+
+def test_uitf_probe_unchanged_date_skips_everything(db, caplog):
+    seed_banks((3, "BPI WEALTH"), (7, "China Banking Corporation"))
+    seed_navpu(SOURCE_UITF, "2026-08-11", batch_name="BPI WEALTH")
+    spider = UitfSpider()
+    run_start(spider)  # issues the probe request
+    with caplog.at_level(logging.INFO, logger="uitf"):
+        output = list(
+            spider.parse_probe(
+                uitf_response(UITF_PAGE_HTML.format(date="Aug 11, 2026")),
+                bank_name="BPI WEALTH",
+            )
+        )
+    assert output == []
+    logs = [r.getMessage() for r in caplog.records]
+    assert any("no new data" in m for m in logs)
+
+
+def test_uitf_probe_newer_date_parses_probe_and_continues(db, caplog):
+    seed_banks((3, "BPI WEALTH"), (7, "China Banking Corporation"))
+    seed_navpu(SOURCE_UITF, "2026-08-11", batch_name="BPI WEALTH")
+    spider = UitfSpider()
+    run_start(spider)
+    with caplog.at_level(logging.INFO, logger="uitf"):
+        output = list(
+            spider.parse_probe(
+                uitf_response(UITF_PAGE_HTML.format(date="Oct 13, 2026")),
+                bank_name="BPI WEALTH",
+            )
+        )
+    navpu_items = [o for o in output if isinstance(o, NavpuItem)]
+    bank_reqs = [o for o in output if isinstance(o, scrapy.Request)]
+    assert [i.fund_id for i in navpu_items] == ["48"]  # probe page parsed too
+    assert [r.url for r in bank_reqs] == [
+        "https://uitf.com.ph/daily_navpu.php?bank_id=7"
+    ]
+    logs = [r.getMessage() for r in caplog.records]
+    assert any("new data" in m for m in logs)
 
 
 def test_uitf_probe_missing_date_fails_open(db, caplog):
-    seed_navpu(SOURCE_UITF, "2026-10-09")
+    seed_banks((3, "BPI WEALTH"), (7, "China Banking Corporation"))
+    seed_navpu(SOURCE_UITF, "2026-08-11", batch_name="BPI WEALTH")
     spider = UitfSpider()
-    spider.selected = [(3, "BPI WEALTH")]
-    blank = probe_response("<html><body><p>moved</p></body></html>")
+    run_start(spider)
+    blank = uitf_response("<html><body><p>moved</p></body></html>")
     with caplog.at_level(logging.WARNING, logger="uitf"):
-        output = list(spider.parse_probe(blank))
-    assert len(output) == 1
+        output = list(spider.parse_probe(blank, bank_name="BPI WEALTH"))
+    bank_reqs = [o for o in output if isinstance(o, scrapy.Request)]
+    assert [r.url for r in bank_reqs] == [
+        "https://uitf.com.ph/daily_navpu.php?bank_id=7"
+    ]
     assert any(
-        "no as-of date" in record.getMessage() for record in caplog.records
+        "no as-of date" in r.getMessage() for r in caplog.records
     )
 
 
-def test_uitf_force_skips_probe_and_yields_banks(db):
-    seed_banks((3, "BPI WEALTH"), (7, "China Banking Corporation"))
-    seed_navpu(SOURCE_UITF, "2026-10-09")
-    requests = run_start(UitfSpider(force="1"))
+def test_uitf_force_scrapes_even_when_db_has_today(db):
+    _, requests = uitf_requests(manila_today(), force="1")
     assert [r.url for r in requests] == [
         "https://uitf.com.ph/daily_navpu.php?bank_id=3",
         "https://uitf.com.ph/daily_navpu.php?bank_id=7",
     ]
 
 
-def test_pifa_unchanged_date_yields_nothing(db, caplog):
-    seed_navpu(SOURCE_MUTUAL, "2026-10-09")
+def test_uitf_parse_logs_page_as_of_date(db, caplog):
+    spider = UitfSpider()
+    with caplog.at_level(logging.INFO, logger="uitf"):
+        output = list(
+            spider.parse(
+                uitf_response(UITF_PAGE_HTML.format(date="Oct 13, 2026")),
+                bank_name="BPI WEALTH",
+            )
+        )
+    assert any(isinstance(o, NavpuItem) for o in output)
+    assert any(
+        "BPI WEALTH: page as-of date: 2026-10-13" in r.getMessage()
+        for r in caplog.records
+    )
+
+
+def test_pifa_skips_when_page_as_of_not_advanced(db, caplog):
+    seed_navpu(SOURCE_MUTUAL, "2026-10-09")  # page fixture says 10/09/2026
     spider = PifaSpider()
     with caplog.at_level(logging.INFO, logger="pifa"):
         output = list(spider.parse(pifa_response()))
     assert output == []
-    assert any("up to date" in record.getMessage() for record in caplog.records)
+    logs = [r.getMessage() for r in caplog.records]
+    assert any("page as-of date: 2026-10-09 (DB as-of date: 2026-10-09" in m for m in logs)
+    assert any("up to date" in m for m in logs)
 
 
-def test_pifa_newer_date_yields_items(db):
+def test_pifa_yields_when_page_as_of_advances(db):
     seed_navpu(SOURCE_MUTUAL, "2026-10-08")
     spider = PifaSpider()
     output = list(spider.parse(pifa_response()))
@@ -419,7 +479,7 @@ def test_pifa_empty_db_yields_items(db):
     assert any(isinstance(o, NavpuItem) for o in output)
 
 
-def test_pifa_force_yields_when_unchanged(db):
+def test_pifa_force_yields_even_when_unchanged(db):
     seed_navpu(SOURCE_MUTUAL, "2026-10-09")
     spider = PifaSpider(force="true")
     output = list(spider.parse(pifa_response()))
