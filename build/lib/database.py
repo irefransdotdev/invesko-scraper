@@ -494,6 +494,31 @@ def get_latest_as_of_date(source: str) -> str | None:
         _safe_close(conn)
 
 
+def get_freshest_bank(source: str) -> tuple[int, str | None] | None:
+    """(bank_id, as_of_date) of the fund row with the newest as_of_date.
+
+    The daily uitf spider probes this provider first: it is the bank that
+    published most recently, so its page is the most likely to carry new
+    data when checking whether anything has updated today. Returns None
+    when the source has no dated rows tied to a bank (e.g. 'mutual').
+    """
+    conn = connect()
+    try:
+        row = conn.execute(
+            "SELECT f.bank_id, n.as_of_date FROM navpu n "
+            "JOIN funds f ON n.source = f.source AND n.fund_id = f.fund_id "
+            "WHERE n.source = ? AND n.as_of_date != '' "
+            "AND f.bank_id IS NOT NULL "
+            "ORDER BY n.as_of_date DESC, n.scraped_at DESC LIMIT 1",
+            (source,),
+        ).fetchone()
+        if not row:
+            return None
+        return int(row[0]), row[1]
+    finally:
+        _safe_close(conn)
+
+
 def load_banks() -> list[tuple[int, str | None]]:
     """All known fund providers as (bank_id, name), ordered by bank_id.
 
